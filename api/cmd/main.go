@@ -4,6 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
+
+	"github.com/karimNafiz/ChatApplication_WebRTC/internal/jsonlog"
 )
 
 const version = "1.0.0"
@@ -24,13 +27,14 @@ type configs struct {
 }
 
 type application struct {
-	cfg configs
+	cfg    configs
+	logger *jsonlog.Logger
 	// need a logger
 }
 
 func main() {
 	var cfg configs
-
+	var logger *jsonlog.Logger = jsonlog.New(os.Stdout, jsonlog.LevelInfo)
 	// take in the command line arguments
 	flag.IntVar(&cfg.port, "port", 4000, "web application port")
 	flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
@@ -39,7 +43,8 @@ func main() {
 
 	app := &application{
 
-		cfg: cfg,
+		cfg:    cfg,
+		logger: logger,
 	}
 
 	srv := &http.Server{
