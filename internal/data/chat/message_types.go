@@ -8,9 +8,9 @@ type MessageType int
 */
 
 const (
-	MessageText MessageType = iota
-	MessageImage
-	MessageFile
-	MessageVideo
-	MessageAudio
+	EMessageText MessageType = iota
+	EMessageImage
+	EMessageFile
+	EMessageVideo
+	EMessageAudio
 )
