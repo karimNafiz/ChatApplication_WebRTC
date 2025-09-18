@@ -1,11 +1,17 @@
 package main
 
 import (
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/gorilla/websocket"
+
+	// TODO: change this to your actual module path for the data package
+	"github.com/karimNafiz/ChatApplication_WebRTC/internal/data"
 )
 
 var upgrader = websocket.Upgrader{
@@ -59,124 +65,154 @@ func (app *application) clientEstablishWebSocket(w http.ResponseWriter, r *http.
 */
 
 func (app *application) manageClientSocket(conn *websocket.Conn) {
+	// Optional: set read limits to avoid abuse (tune for your app)
+	const (
+		maxHeaderBytes = 64 * 1024       // 64KB header cap
+		maxBodyBytes   = 4 * 1024 * 1024 // 4MB body cap (tune)
+	)
+
+	/*
+		important stuff
+	*/
+	defer func() {
+		_ = conn.Close()
+	}()
+
 	for {
 		select {
 		case <-app.cancel:
-			/*
-				need to do the clean up here, but return I will return
-			*/
+			// TODO: any conn-specific cleanup here
 			return
 		default:
-			/*
-				we need to start reading here
-			*/
-			msgType, r, err := conn.NextReader()
+			// keeping this empty for beauty
+		}
 
-			/*
-				need to find a way to handle this
-			*/
+		msgType, r, err := conn.NextReader()
+		if err != nil {
+			app.logger.PrintError(fmt.Errorf("websocket next reader: %w", err), nil)
+			return
+		}
+
+		switch msgType {
+		case websocket.TextMessage:
+
+			// read header size
+			headerLen, err := readUint32BE(r)
 			if err != nil {
+				app.logger.PrintError(fmt.Errorf("reading header length: %w", err), nil)
 				/*
-					!!!!TODO
-					when we have the proper client information, we can output client information
-
+					need to handle this better
 				*/
-				app.logger.PrintError(fmt.Errorf("error trying to read from the web socket %w", err), nil)
-
-				// right now if there is an error, I will just return
-				// TODO: must perform clean up
+				return
+			}
+			if headerLen == 0 || headerLen > maxHeaderBytes {
+				app.logger.PrintError(fmt.Errorf("invalid header length: %d", headerLen), nil)
+				/*
+					need to handle this better, instead of returning I need to clean out the buffer so that I can continue getting more data
+				*/
 				return
 			}
 
-			switch msgType {
-			case websocket.TextMessage:
-				/*
-					message structure 4 bytes to hold the size of the header
-					get the convert the bytes to int which will basically tell use the size of the header
-
-					the header should be a json
-					header:{
-						size: //size,
-						//other information
-					}
-					body:{
-						// body
-					}
-				*/
-				headerBytes := make([]byte, 4)
-				for {
-
-					_, err := readBytes(r, headerBytes)
-					if err != nil {
-						app.logger.PrintError(err, nil)
-						continue
-					}
-
-				}
-
-			/*
-				this is for audio, video, and other stuff
-			*/
-			case websocket.BinaryMessage:
-
+			// parse header json
+			headerBuf := make([]byte, int(headerLen))
+			if err := readFull(r, headerBuf); err != nil {
+				app.logger.PrintError(fmt.Errorf("reading header: %w", err), nil)
+				return
 			}
 
+			var hdr data.TCPHeader
+			if err := json.Unmarshal(headerBuf, &hdr); err != nil {
+				app.logger.PrintError(fmt.Errorf("unmarshal header JSON: %w", err), nil)
+				// TODO: need to handle this better
+				return
+			}
+
+			// house keeping
+			if hdr.BodySize < 0 || hdr.BodySize > maxBodyBytes {
+				app.logger.PrintError(fmt.Errorf("invalid body size: %d", hdr.BodySize), nil)
+				// TODO: need to handle this better
+				return
+			}
+
+			// parse body, for text it should be json
+			bodyBuf := make([]byte, hdr.BodySize)
+			if err := readFull(r, bodyBuf); err != nil {
+				app.logger.PrintError(fmt.Errorf("reading body: %w", err), nil)
+				return
+			}
+
+			switch hdr.MessageType {
+
+			default:
+				// Assume text payload encoded as JSON matching TCPBody_Text
+				var body data.TCPBody_Text
+				if err := json.Unmarshal(bodyBuf, &body); err != nil {
+					app.logger.PrintError(fmt.Errorf("unmarshal body JSON: %w", err), nil)
+					return
+				}
+
+				// right now just logging it out
+				app.logger.PrintInfo("received text body from client", map[string]string{
+					"len":  fmt.Sprintf("%d", len(body.Body)),
+					"text": body.Body, // careful with logging PII; trim in prod
+				})
+
+				// simple ack
+				w, err := conn.NextWriter(websocket.TextMessage)
+				if err == nil {
+					ack := map[string]any{"ok": true, "type": hdr.MessageType}
+					if enc, e := json.Marshal(ack); e == nil {
+						// Frame format for reply (simple JSON, no length prefix)
+						_, _ = w.Write(enc)
+					}
+					_ = w.Close()
+				}
+			}
+
+			// 6) Drain to end-of-frame if there’s leftover (shouldn’t be, but safe)
+			_, _ = io.Copy(io.Discard, r)
+
+		case websocket.BinaryMessage:
+			// You said to ignore binary for now; just drain it.
+			_, _ = io.Copy(io.Discard, r)
+
+		default:
+			// Control or unsupported types; drain and continue
+			_, _ = io.Copy(io.Discard, r)
 		}
-
 	}
-
 }
 
-func readBytes(r io.Reader, buffer []byte) (int, error) {
-	n, err := r.Read(buffer)
-	if n < len(buffer) {
-		return n, fmt.Errorf("read %d bytes, supposed to read %d bytes, %w", n, len(buffer), insufficientBytes)
-	}
-	return n, err
-
-}
-
+// readFull reads exactly len(buf) bytes into buf (or returns an error).
 /*
-for {
-    msgType, r, err := conn.NextReader()
-    if err != nil {
-        log.Println("nextreader error:", err)
-        break
-    }
-
-    switch msgType {
-    case websocket.TextMessage:
-        // Read text in chunks
-        buf := make([]byte, 1024) // 1KB chunks
-        for {
-            n, err := r.Read(buf)
-            if n > 0 {
-                fmt.Println("Got text chunk:", string(buf[:n]))
-            }
-            if err == io.EOF {
-                break // done with this message
-            }
-            if err != nil {
-                log.Println("read error:", err)
-                break
-            }
-        }
-
-    case websocket.BinaryMessage:
-        // Example: save binary data to a file
-        f, _ := os.Create("upload.bin")
-        defer f.Close()
-        if _, err := io.Copy(f, r); err != nil {
-            log.Println("copy error:", err)
-        }
-        fmt.Println("Saved binary message to file")
-
-    default:
-        log.Println("Other message type:", msgType)
-    }
-}
-
-
-
+	the io.ReadFull function gave me so much pain in the FileUploadMicroservice
 
 */
+func readFull(r io.Reader, buf []byte) error {
+	total := 0
+	for total < len(buf) {
+		n, err := r.Read(buf[total:])
+		if n > 0 {
+			total += n
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) && total == len(buf) {
+				return nil
+			}
+			return fmt.Errorf("readFull: read %d/%d: %w", total, len(buf), err)
+		}
+	}
+	return nil
+}
+
+// readUint32BE reads 4 bytes and returns a big-endian uint32.
+/*
+	in the documentation need to mention, we will be using big-endian
+*/
+func readUint32BE(r io.Reader) (uint32, error) {
+	var b [4]byte
+	if err := readFull(r, b[:]); err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(b[:]), nil
+}
